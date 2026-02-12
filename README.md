@@ -1,4 +1,5 @@
 # REAM: Compressing Mixture-of-Experts LLMs
+Authors: Boris Knyazev
 
 Blog post: https://bknyaz.github.io/blog/2026/moe/
 
