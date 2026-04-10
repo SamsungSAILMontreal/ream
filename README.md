@@ -8,44 +8,56 @@ Authors: [Saurav Jha](https://sauravjha.com.np/)\*, Maryam Hashemzadeh, Ali Sahe
 
 [blogpost](https://bknyaz.github.io/blog/2026/moe/)
 
-REAM-ed models 🤗: 
-- Qwen3:
-  - [x] https://huggingface.co/collections/SamsungSAILMontreal/ream
-  - [x] https://huggingface.co/bknyaz
-- GLM:
-- [ ] GLM-4.5-Air coming soon
+REAM-ed Qwen3 and GLM-4.5-Air and models 🤗:
+  - https://huggingface.co/collections/SamsungSAILMontreal/ream
+  - https://huggingface.co/bknyaz
 
-[Baseline REAP](https://github.com/CerebrasResearch/reap)
+[Baseline REAP repo](https://github.com/CerebrasResearch/reap)
+
+## Requirements
+
+See requirements.txt for the necessary packages and their recommended versions.
+These are the versions we used for our experiments, but you may be able to use other versions as well.
+
+`pip install -r requirements.txt`
 
 ## Merging
 
-Run `python merge.py --model <> --merge_size <> --save_path <>` to merge (or prune) the experts.
+Obtaining a merged model from the original one requires running the merge.py script with appropriate arguments, e.g.:
+
+`python merge.py --model <> --merge_size <> --save_path <> ...`
+
 See merge.py and config.py for the hyperparameters and options.
 Default arguments correspond to our full REAM model.
+`--merge_size` should be chosen appropriately, e.g. 25% or 50% of the original number of experts.
 
-MTP layers are supported, but checked only for qwen3 and requires additional steps:
+MTP (Multi-token Prediction) layers, present in some LLMs for more efficient decoding, 
+are supported in our code (treated as an additional MoE layer), 
+but it was checked only for Qwen3 and requires additional steps:
 - setting the `--mtp_safe_tensors` file path
-- renaming the saved model safe tensors of the MTP and other layers and corresponding model.safetensors.index.json
-- See https://huggingface.co/bknyaz/Qwen3-Next-80B-A3B-Instruct-REAM for our example of the resulted model.
+- renaming the merged model's safe tensors of the MTP and other layers and the corresponding model.safetensors.index.json file 
+
+See [Qwen3-Next-80B-A3B-Instruct-REAM](https://huggingface.co/bknyaz/Qwen3-Next-80B-A3B-Instruct-REAM) for our example of the merged model with MTP layers.
 
 
 ## Evaluation
 
-The original and compressed (merged/pruned) models are evaluated on MC and GEN tasks.
+We evaluate the original and compressed (merged/pruned) models on the MC and GEN tasks.
 
 ### MC tasks
 
-Run `python eval_mc.py` to evaluate the merged model on multiple-choice tasks.
+Run `python eval_mc.py` to evaluate the merged model on 8 multiple-choice tasks.
 The main options are `--model` and `--batch_size`. 
 See eval_mc.py and config.py for more options.
 
 ### GEN tasks
 
-We use the following tools as described on our huggingface page and in the paper:
+We evaluate on 6 generative tasks: IFEval, AIME25, GSM8K, GPQA-Diamond, HumanEval and LiveCodeBench
+We use the following tools as described on [our main huggingface page](https://huggingface.co/SamsungSAILMontreal/Qwen3-30B-A3B-Instruct-2507-REAM) and in the paper:
 
-- lmeval https://github.com/EleutherAI/lm-evaluation-harness
+- lm-eval https://github.com/EleutherAI/lm-evaluation-harness
 - LiveCodeBench https://github.com/LiveCodeBench/LiveCodeBench
-- GLM (for humaneval and lcb): https://github.com/zai-org/glm-simple-evals
+- For GLM-4.5-Air, HumanEval and LiveCodeBench tasks: https://github.com/zai-org/glm-simple-evals (see [GLM-4.5-Air-REAM](https://huggingface.co/bknyaz/GLM-4.5-Air-REAM) for details)
 
 
 ## License
