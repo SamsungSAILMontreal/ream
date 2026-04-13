@@ -53,7 +53,7 @@ class Merger:
         :param merge_size: number of experts after merging (per each layer)
         :param grouping: hcsmoe or ream
         :param merging: approach to merge a group expert
-        :param saliency: freq or ream
+        :param saliency: freq or reap
         :param dataset: calibration data
         :param mix_ratio: calibration data mix
         :param tokenizer_name: qwen3 or glm
@@ -105,7 +105,7 @@ class Merger:
                     print(f'loading batch from {batch_file}', flush=True)
                     batch_dset = torch.load(batch_file)
                     print_seq_stats(batch_dset)
-                    n_samples = int(np.round(calibration_data_size * ratio))
+                    n_samples = int(calibration_data_size * ratio)
                     if n_samples == 0:
                         print(f'skipping dataset {dset} with ratio {ratio}')
                         continue
@@ -175,7 +175,7 @@ class Merger:
         is_mtp = layer_ind >= len(self.model.model.layers)  # assuming mtp going after all MoE layers
 
         if collect_outputs:
-            n_batches = max(1, (self.batch['input_ids'].shape[0] + self.batch_size - 1) // self.batch_size)
+            n_batches = max(1, self.batch['input_ids'].shape[0] // self.batch_size)
 
             # first forward pass with hooks to collect outputs from all the experts before merging
             def hook_fn(module, inputs, output):
@@ -325,7 +325,7 @@ class Merger:
                     print(f'layer {layer_ind}: expert_logits', expert_logits.shape, expert_logits.dtype,
                           'expert_act', expert_act.shape, expert_act.dtype,
                           'gate_logits', (gate_logits.shape, gate_logits.dtype) if self.use_gate_output else 'None',
-                          '{self.saliency} saliency scores', saliency.shape,
+                          f'{self.saliency} saliency scores', saliency.shape,
                           [str('%.8f' % f) for f in saliency], flush=True)
 
                 zeros = saliency == 0
