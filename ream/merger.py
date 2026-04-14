@@ -71,9 +71,16 @@ class Merger:
         self.mtp_state_dict = mtp_state_dict
         self.merge_size = merge_size
         self.first_moe_layer = getattr(model.config, 'first_k_dense_replace', 0)  # e.g. for GLM models
-        self.top_k = model.model.layers[self.first_moe_layer].mlp.top_k
+        first_moe = model.model.layers[self.first_moe_layer].mlp
+        if not hasattr(first_moe, 'top_k'):
+            for idx in range(self.first_moe_layer, len(model.model.layers)):
+                moe = model.model.layers[idx].mlp
+                moe.top_k = moe.gate.top_k
+                moe.num_experts = len(moe.experts)
+
+        self.top_k = first_moe.top_k
         assert self.top_k == model.config.num_experts_per_tok, (self.top_k, model.config.num_experts_per_tok)
-        self.n_experts = len(model.model.layers[self.first_moe_layer].mlp.experts)
+        self.n_experts = len(first_moe.experts)
         self.grouping = grouping
         self.merging = merging
         self.saliency = saliency
@@ -217,7 +224,8 @@ class Merger:
             print('moe forward input', 'mtp', is_mtp,
                   states['hidden_states'].shape, states['attention_mask'].shape)
         for i_ in tqdm(range(0, len(states['hidden_states']), self.batch_size),
-                       desc=f"{'MTP' if is_mtp else 'MoE'} Running forward pass to collect expert activations..."):
+                       desc=f"{'MTP' if is_mtp else 'MoE'} Running forward pass to "
+                            f"{'collect expert activations' if collect_outputs else 'propagate hidden states'}..."):
             if not is_mtp:
                 hid_states = moe_forward(self.model.model.layers[layer_ind],
                                          states,
@@ -412,6 +420,11 @@ class Merger:
                 moe_layer.num_experts = len(moe_layer.experts)
                 moe_layer.gate.weight.data = moe_layer.gate.weight.data[experts_to_keep]
                 moe_layer.gate.out_features = len(moe_layer.experts)
+                # Update TopkRouter-specific attributes if present (e.g. GLM); no-op for nn.Linear (Qwen)
+                if hasattr(moe_layer.gate, 'n_routed_experts'):
+                    moe_layer.gate.n_routed_experts = len(moe_layer.experts)
+                if hasattr(moe_layer.gate, 'e_score_correction_bias'):
+                    moe_layer.gate.e_score_correction_bias = moe_layer.gate.e_score_correction_bias[experts_to_keep]
 
                 if is_mtp:
                     self.mtp_layer.layer.mlp = moe_layer

@@ -128,7 +128,10 @@ def run_all_experts(moe_layer,
 
     n_experts = len(moe_layer.experts)
     # get gate outputs
-    router_logits = moe_layer.gate(flat_input).view(B, S, n_experts)  # shape: (B, S, E)
+    if isinstance(moe_layer.gate, torch.nn.Linear):
+        router_logits = moe_layer.gate(flat_input).view(B, S, n_experts)  # shape: (B, S, E)
+    else:
+        router_logits = F.linear(flat_input, moe_layer.gate.weight).view(B, S, n_experts)
     if only_gates:
         return router_logits
 
