@@ -19,8 +19,8 @@ from scipy.optimize import linear_sum_assignment
 from .hc import hcsmoe
 from .ream import pseudo_group
 from .utils import mem, normalize_rows, num_parameters
-from .moe_utils import run_all_experts, moe_forward, get_moe_input
-from .weight_utils import ffn_weight_matrix, pca_reduce, apply_perm_to_ffn
+from .moe_utils import run_all_experts, moe_forward, get_moe_input, get_num_experts
+from .weight_utils import ffn_weight_matrix, pca_reduce, apply_perm_to_ffn, experts_weight_matrix
 from .saliency import reap, freq
 from data.calibration_data import print_seq_stats
 
@@ -44,7 +44,7 @@ class Merger:
                  calibration_data_size: int = 3072,
                  calibration_data_seq_len: int = 512,
                  seed: int = 42,
-                 verbose: bool = False
+                 verbose: bool = True
                  ):
         """
         Default parameters are good for merging Qwen3 models like Qwen3-Coder-Next.
@@ -76,11 +76,11 @@ class Merger:
             for idx in range(self.first_moe_layer, len(model.model.layers)):
                 moe = model.model.layers[idx].mlp
                 moe.top_k = moe.gate.top_k
-                moe.num_experts = len(moe.experts)
+                moe.num_experts = get_num_experts(moe)
 
         self.top_k = first_moe.top_k
         assert self.top_k == model.config.num_experts_per_tok, (self.top_k, model.config.num_experts_per_tok)
-        self.n_experts = len(first_moe.experts)
+        self.n_experts = get_num_experts(first_moe)
         self.grouping = grouping
         self.merging = merging
         self.saliency = saliency
@@ -151,8 +151,11 @@ class Merger:
         if self.mtp_state_dict is None:
             self.mtp_layer = None
         else:
-            # only qwen3 mtp layers have been checked
-            from .qwen3_mtp import build_mtp_layer
+            # only qwen3/3.5 mtp layers have been checked
+            if 'qwen3_5' in self.model.__class__.__name__.lower():
+                from .qwen3_mtp import build_mtp_layer_qwen3_5 as build_mtp_layer
+            else:
+                from .qwen3_mtp import build_mtp_layer
             self.num_layers += 1
             # assuming qwen3 naming
             num_experts_orig = len(self.mtp_state_dict['mtp.layers.0.mlp.gate.weight'])
@@ -242,9 +245,9 @@ class Merger:
                                             shift=False)
 
             if i_ == 0 and verbose:
-                n_exp = len(self.model.model.layers[layer_ind].mlp.experts) if hasattr(
+                n_exp = get_num_experts(self.model.model.layers[layer_ind].mlp) if hasattr(
                     self.model.model.layers[layer_ind].mlp, 'experts') and not is_mtp else \
-                    ((len(self.mtp_layer.layer.mlp.experts)) if is_mtp else 'dense')
+                    (get_num_experts(self.mtp_layer.layer.mlp) if is_mtp else 'dense')
                 print('moe forward, hid_states', hid_states.shape, hid_states.dtype, hid_states.device,
                       'experts', n_exp,
                       flush=True)
@@ -277,7 +280,7 @@ class Merger:
             if layer_ind < self.first_moe_layer:
                 top_k.append(0)  # dense layer, no MoE
                 continue
-            total_experts += len(layer.mlp.experts)
+            total_experts += get_num_experts(layer.mlp)
             top_k.append(layer.mlp.top_k)
         print(f'\nTotal experts before merging: {total_experts}', flush=True)
         print(
@@ -309,7 +312,7 @@ class Merger:
             assert getattr(moe_layer.gate, 'bias', None) is None, ('no bias expected', moe_layer.gate)
             num_params = num_parameters(moe_layer)
 
-            n_experts = len(moe_layer.experts)
+            n_experts = get_num_experts(moe_layer)
             if self.merge_size < n_experts:
                 # fills expert_outs for a single layer
                 # for sequential merging, just get expert features at this step
@@ -350,7 +353,11 @@ class Merger:
                 if 'weight' in self.merging:
                     # mlps: list of length N=128; each element is a dict with 'gate_proj','up_proj','down_proj'
                     # use pca for building low-dimensional weight representations and faster processing
-                    expert_weights = torch.stack([ffn_weight_matrix(mlp) for mlp in moe_layer.experts])  # (n, 768, 6144)
+                    if isinstance(moe_layer.experts, nn.ModuleList):
+                        expert_weights = torch.stack(
+                            [ffn_weight_matrix(mlp) for mlp in moe_layer.experts])  # (n, 768, 6144)
+                    else:
+                        expert_weights = experts_weight_matrix(moe_layer.experts)
                     weights_sz = expert_weights.shape
                     expert_weights = pca_reduce(normalize_rows(expert_weights).flatten(0, 1),
                                                 r=self.pca_dim,
@@ -394,6 +401,11 @@ class Merger:
 
                 experts_to_delete = []
                 experts_to_keep = []
+                experts = None
+                if not isinstance(moe_layer.experts, nn.ModuleList):
+                    from copy import deepcopy
+                    experts = deepcopy(moe_layer.experts)
+               
                 for group_ind, group in enumerate(groups):
                     if verbose:
                         print(f'layer {layer_ind}: group_ind:', group_ind, 'size:', len(group),
@@ -408,21 +420,33 @@ class Merger:
                                                  expert_weights=expert_weights,
                                                  expert_act=expert_act
                                                  )
-                        moe_layer.experts[group[0]] = merged_exp
+                        if experts is None:
+                            moe_layer.experts[group[0]] = merged_exp
+                        else:
+                            experts.gate_up_proj.data[group[0]] = merged_exp.gate_up_proj.data
+                            experts.down_proj.data[group[0]] = merged_exp.down_proj.data
+
                         experts_to_delete.extend(group[1:])  # keep the first expert in each group
                     experts_to_keep.append(group[0])
 
                 experts_to_delete.sort(reverse=True)
                 experts_to_keep.sort()
                 experts_to_keep = np.array(experts_to_keep)
-                for idx in experts_to_delete:
-                    del moe_layer.experts[idx]
-                moe_layer.num_experts = len(moe_layer.experts)
+                if experts is None:
+                    for idx in experts_to_delete:
+                        del moe_layer.experts[idx]
+                else:
+                    experts.gate_up_proj.data = experts.gate_up_proj.data[experts_to_keep]
+                    experts.down_proj.data = experts.down_proj.data[experts_to_keep]
+                    experts.num_experts = len(experts_to_keep)
+                    moe_layer.experts = experts
+
+                moe_layer.num_experts = get_num_experts(moe_layer)
                 moe_layer.gate.weight.data = moe_layer.gate.weight.data[experts_to_keep]
-                moe_layer.gate.out_features = len(moe_layer.experts)
+                moe_layer.gate.out_features = get_num_experts(moe_layer)
                 # Update TopkRouter-specific attributes if present (e.g. GLM); no-op for nn.Linear (Qwen)
                 if hasattr(moe_layer.gate, 'n_routed_experts'):
-                    moe_layer.gate.n_routed_experts = len(moe_layer.experts)
+                    moe_layer.gate.n_routed_experts = get_num_experts(moe_layer)
                 if hasattr(moe_layer.gate, 'e_score_correction_bias'):
                     moe_layer.gate.e_score_correction_bias = moe_layer.gate.e_score_correction_bias[experts_to_keep]
 
@@ -438,7 +462,7 @@ class Merger:
 
             assert moe_layer.num_experts == self.merge_size, (moe_layer.num_experts, self.merge_size)
 
-            total_experts += len(moe_layer.experts)
+            total_experts += get_num_experts(moe_layer)
             top_k.append(moe_layer.top_k)
 
             if self.sequential:
@@ -447,6 +471,7 @@ class Merger:
                                                layer_ind,
                                                collect_outputs=False,
                                                upd_hid=True,
+                                               inputs_embeds=inputs_embeds,
                                                verbose=verbose)
 
             if is_mtp:
@@ -456,8 +481,8 @@ class Merger:
 
             print('finished layer', layer_ind,
                   'num experts orig', n_experts,
-                  'num experts merge', len(self.mtp_layer.layer.mlp.experts
-                                           if is_mtp else self.model.model.layers[layer_ind].mlp.experts),
+                  'num experts merge', get_num_experts(self.mtp_layer.layer.mlp
+                                           if is_mtp else self.model.model.layers[layer_ind].mlp),
                   'num params orig', num_params,
                   'num params merged', num_parameters(self.mtp_layer.layer.mlp
                                                       if is_mtp else self.model.model.layers[layer_ind].mlp),
@@ -506,7 +531,17 @@ class Merger:
         """
 
         assert len(group) > 0, group
-        merged = experts[group[0]]
+        def get_expert(ind):
+            if isinstance(experts, nn.ModuleList):
+                return experts[ind]
+            else:
+                from copy import deepcopy
+                exp = deepcopy(experts)
+                exp.gate_up_proj.data = exp.gate_up_proj.data[ind]
+                exp.down_proj.data = exp.down_proj.data[ind]
+                return exp
+
+        merged = get_expert(group[0])
 
         if len(group) == 1 or self.merging == 'none':  # drop/prune other experts in case of none like in REAP
             return merged
@@ -514,12 +549,15 @@ class Merger:
         if self.merging == 'avg':
             # For each param, average over experts in group
             for name, param in merged.named_parameters():
-                stacked = torch.stack([experts[i].state_dict()[name] for i in group], dim=0)
+                stacked = torch.stack([get_expert(i).state_dict()[name] for i in group], dim=0)
                 avg_param = stacked.mean(dim=0).to(param)
                 param.copy_(avg_param)
         else:
             # assume indices are already sorted by saliency
-            assert len(saliency) == len(experts), (len(saliency), len(experts))
+            if isinstance(experts, nn.ModuleList):
+                assert len(saliency) == len(experts), (len(saliency), len(experts))
+            else:
+                assert len(saliency) == experts.num_experts
             if isinstance(saliency, torch.Tensor):
                 saliency = saliency.cpu().numpy()
             w = saliency[group]  # use sorted saliency as weights
@@ -557,9 +595,9 @@ class Merger:
 
             for j, idx in enumerate(group[1:]):
                 if self.merging == 'avg_freq':
-                    aligned_b = experts[idx]
+                    aligned_b = get_expert(idx)
                 else:
-                    aligned_b = apply_perm_to_ffn(experts[idx], perm_lst[j])
+                    aligned_b = apply_perm_to_ffn(get_expert(idx), perm_lst[j])
 
                 for name, param in merged.named_parameters():
                     # compute weighted average of params

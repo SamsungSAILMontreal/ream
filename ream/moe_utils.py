@@ -17,6 +17,14 @@ from typing import Any, Callable, Optional
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
 
+def get_num_experts(moe):
+    """
+    Gets the number of experts in a MoE layer supporting Qwen3.5.
+    :param moe: MoE layer
+    :return: number of experts
+    """
+    return len(moe.experts) if isinstance(moe.experts, torch.nn.ModuleList) else moe.experts.num_experts
+
 def get_moe_input(
         model,
         device,
@@ -126,7 +134,7 @@ def run_all_experts(moe_layer,
 
     flat_input = hidden_states.view(B * S, H)
 
-    n_experts = len(moe_layer.experts)
+    n_experts = get_num_experts(moe_layer)
     # get gate outputs
     if isinstance(moe_layer.gate, torch.nn.Linear):
         router_logits = moe_layer.gate(flat_input).view(B, S, n_experts)  # shape: (B, S, E)
@@ -140,16 +148,24 @@ def run_all_experts(moe_layer,
 
     outputs_act = None
     outputs = None
-    for i, expert in enumerate(moe_layer.experts):
-        # Each expert is Qwen3MoeMLP
-        assert expert.__class__.__name__.find('MLP') >= 0, f'Unexpected expert class {expert.__class__.__name__}'
-        # expert: gate_proj, up_proj, down_proj, act_fn
-        # flat_input: (B*S, H)
-        # out_act: (B*S, D)
-        # out: (B*S, H)
-        # implements original function: self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        out_act = expert.act_fn(expert.gate_proj(flat_input)) * expert.up_proj(flat_input)
-        out = expert.down_proj(out_act)  # shape: (B*S, H)
+    for i in range(n_experts):
+
+        if isinstance(moe_layer.experts, torch.nn.ModuleList):
+            expert = moe_layer.experts[i]
+            # Each expert is Qwen3MoeMLP
+            assert expert.__class__.__name__.find('MLP') >= 0, f'Unexpected expert class {expert.__class__.__name__}'
+            # expert: gate_proj, up_proj, down_proj, act_fn
+            # flat_input: (B*S, H)
+            # out_act: (B*S, D)
+            # out: (B*S, H)
+            # implements original function: self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+            out_act = expert.act_fn(expert.gate_proj(flat_input)) * expert.up_proj(flat_input)
+            out = expert.down_proj(out_act)  # shape: (B*S, H)
+        else:
+            # Each expert is a slice of the params in Qwen3_5
+            gate, up = F.linear(flat_input, moe_layer.experts.gate_up_proj[i]).chunk(2, dim=-1)
+            out_act = moe_layer.experts.act_fn(gate) * up
+            out = F.linear(out_act, moe_layer.experts.down_proj[i])
 
         if gated_sim:
             out = out * softmax_logits[:, i].view(-1, 1)  # (B*S, H)
@@ -160,9 +176,9 @@ def run_all_experts(moe_layer,
             out_act = out_act[ind]
 
         if outputs_act is None:
-            outputs_act = torch.zeros(len(moe_layer.experts), out_act.shape[0], out_act.shape[1],
+            outputs_act = torch.zeros(n_experts, out_act.shape[0], out_act.shape[1],
                                       dtype=out_act.dtype, device=out_act.device)
-            outputs = torch.zeros(len(moe_layer.experts), 1 if final_reduce else out.shape[0], out.shape[1],
+            outputs = torch.zeros(n_experts, 1 if final_reduce else out.shape[0], out.shape[1],
                                   dtype=out.dtype, device=out.device)
 
         outputs_act[i] = out_act

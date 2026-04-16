@@ -10,5 +10,4 @@ from .moe_utils import *
 from .weight_utils import *
 from .hc import *
 from .ream import *
-from .qwen3_mtp import build_mtp_layer
 from .merger import Merger

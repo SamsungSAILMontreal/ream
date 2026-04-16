@@ -39,6 +39,19 @@ def ffn_weight_matrix(ffn: torch.nn.Module) -> torch.Tensor:
     matrix = torch.cat([gate, up, down.t()], dim=1)  # (768, 2048+2048+2048=6144)
     return matrix
 
+def experts_weight_matrix(ffn: torch.nn.Module) -> torch.Tensor:
+    """
+    Same as ffn_weight_matrix, but applied for transformer5+ style experts (all experts stacked into a single tensor).
+    :param ffn: transformer5+ experts module
+    :return: 3d tensor
+    """
+    gate_up = to_cpu_float(ffn.gate_up_proj.data)
+    gate = gate_up[:, :ffn.intermediate_dim]  # n,h,d
+    up = gate_up[:, ffn.intermediate_dim:]    # n,h,d
+    down = to_cpu_float(ffn.down_proj.data)   # n,d,h
+    matrix = torch.cat([gate, up, down.permute(0, 2, 1)], dim=2)  # n,h,3*d
+    return matrix
+
 def apply_perm_to_ffn(ffn, perm, in_place=True):
     """
     Permutes the hidden neurons of the expert FFN given the permutation matrix.
@@ -53,13 +66,20 @@ def apply_perm_to_ffn(ffn, perm, in_place=True):
     else:
         ffn_aligned = deepcopy(ffn)
 
-    assert ffn.gate_proj.bias is None
-    assert ffn.up_proj.bias is None
-    assert ffn.down_proj.bias is None
+    has_gate_up = hasattr(ffn, 'gate_up_proj')  # for qwen3.5
+    if not has_gate_up:
+        assert ffn.gate_proj.bias is None
+        assert ffn.up_proj.bias is None
+        assert ffn.down_proj.bias is None
 
-    ffn_aligned.gate_proj.weight.data = ffn.gate_proj.weight.data[perm, :]            # rows permuted
-    ffn_aligned.up_proj.weight.data   = ffn.up_proj.weight.data[perm, :]
-    ffn_aligned.down_proj.weight.data = ffn.down_proj.weight.data[:, perm]            # columns permuted
+    if has_gate_up:
+        ffn_aligned.gate_up_proj.data = torch.cat((ffn.gate_up_proj.data[:ffn.intermediate_dim][perm],
+                                                   ffn.gate_up_proj.data[ffn.intermediate_dim:][perm]), dim=0)
+        ffn_aligned.down_proj.data = ffn.down_proj.data[:, perm]
+    else:
+        ffn_aligned.gate_proj.weight.data = ffn.gate_proj.weight.data[perm, :]            # rows permuted
+        ffn_aligned.up_proj.weight.data   = ffn.up_proj.weight.data[perm, :]
+        ffn_aligned.down_proj.weight.data = ffn.down_proj.weight.data[:, perm]            # columns permuted
     return ffn_aligned
 
 def pca_reduce(features: Union[torch.Tensor, list], r: int, verbose: bool = False) -> Union[torch.Tensor, list]:

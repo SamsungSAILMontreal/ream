@@ -126,10 +126,12 @@ if __name__ == '__main__':
     mtp_state_dict = None
     if args.mtp_safe_tensors not in [None, '', 'none', 'None']:
         from safetensors.torch import load_file, save_file
-        try:
-            mtp_state_dict = load_file(args.mtp_safe_tensors)
-        except Exception as e:
-            print(f'error loading mtp weights from {args.mtp_safe_tensors}', flush=True)
+        mtp_state_dict = {}
+        for mtp_file in args.mtp_safe_tensors.split(','):
+            try:
+                mtp_state_dict.update(load_file(mtp_file))
+            except Exception as e:
+                print(f'error loading mtp weights from {mtp_file}', flush=True)
 
     tokenizer_name = None
     for sfx in ['qwen3', 'glm']:
